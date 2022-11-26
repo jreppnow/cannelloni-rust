@@ -19,7 +19,7 @@ jobs:
     - name: Make script executable
       run: chmod +x scripts/setup_vcan.sh
     - name: Setup vcan
-      run: ./scripts/setup_vcan.sh vcan
+      run: sudo ./scripts/setup_vcan.sh vcan
     - name: Build
       run: cargo build --verbose
     - name: Run tests
