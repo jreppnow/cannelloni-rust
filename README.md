@@ -1,6 +1,6 @@
 # cannelloni-rust (wip)
 
-This is a work in progress port of Maximilian Güntner's [cannelloni](https://duckduckgo.com) CAN-over-IP tunneling
+This is a work in progress port of Maximilian Güntner's [cannelloni](https://github.com/mguentner/cannelloni) CAN-over-IP tunneling
 software.
 The main point of building this is for me to get up-to-scratch with async and some other Rust aspects. I do plan to get
 it into a stable and functional state eventually though.
