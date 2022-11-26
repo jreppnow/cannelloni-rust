@@ -22,6 +22,7 @@
 extern crate core;
 
 mod async_can;
+mod proto;
 
 fn main() {
     println!("Hello, world!");

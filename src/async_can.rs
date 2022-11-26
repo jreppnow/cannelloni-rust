@@ -73,12 +73,11 @@ impl AsyncCanSocket {
 mod tests {
     use std::future::join;
 
-    use crate::*;
     use crate::async_can::AsyncCanSocket;
 
     #[test]
     fn async_read_and_write() {
-        use futures::{prelude::*, future, join, executor};
+        use futures::{prelude::*, join, executor};
 
         let writer: AsyncCanSocket = socketcan::CANSocket::open("vcan").unwrap().into();
         let reader: AsyncCanSocket = socketcan::CANSocket::open("vcan").unwrap().into();
@@ -87,7 +86,7 @@ mod tests {
 
 
         executor::block_on(async {
-            let (write_result, read_result) = join!( writer.write_frame(&frame), reader.read_frame());
+            let (write_result, read_result) = join!(writer.write_frame(&frame), reader.read_frame());
 
             assert!(write_result.is_ok());
             assert!(frame.data() == read_result.unwrap().data());
