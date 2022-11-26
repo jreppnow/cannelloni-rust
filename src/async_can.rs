@@ -69,6 +69,7 @@ impl AsyncCanSocket {
     }
 }
 
+#[cfg(feature = "vcan_testing")]
 #[cfg(test)]
 mod tests {
     use std::future::join;
