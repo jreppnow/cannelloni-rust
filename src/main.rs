@@ -17,9 +17,6 @@
  */
 
 #![feature(c_size_t)]
-#![feature(future_join)]
-
-extern crate core;
 
 mod async_can;
 mod proto;
