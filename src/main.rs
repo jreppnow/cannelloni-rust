@@ -17,6 +17,7 @@
  */
 
 #![feature(c_size_t)]
+#![feature(future_join)] // for tests..
 
 mod async_can;
 mod proto;
