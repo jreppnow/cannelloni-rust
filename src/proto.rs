@@ -35,7 +35,7 @@ pub struct MessageSerializer {
 }
 
 pub trait SerializeInto {
-    fn serialize_into(&mut self, buffer: &mut impl BufMut);
+    fn serialize_into(&mut self, buffer: impl BufMut);
 
     fn serialize(&mut self) -> VecDeque<u8> {
         let mut buffer: Vec<u8> = Default::default();
@@ -48,7 +48,7 @@ trait DeserializeFrom {
     type Value;
     type Error;
 
-    fn deserialize_from(buffer: &mut impl Buf) -> Result<Self::Value, Self::Error>;
+    fn deserialize_from(buffer: impl Buf) -> Result<Self::Value, Self::Error>;
 }
 
 impl MessageSerializer {
@@ -69,7 +69,7 @@ impl MessageSerializer {
 }
 
 impl SerializeInto for MessageSerializer {
-    fn serialize_into(&mut self, buffer: &mut impl BufMut) {
+    fn serialize_into(&mut self, mut buffer: impl BufMut) {
         // TODO: Check for available len?
         buffer.put_u8(IMPLEMENTED_VERSION);
         buffer.put_u8(OpCode::Data as u8);
@@ -77,7 +77,7 @@ impl SerializeInto for MessageSerializer {
         buffer.put_u16(self.frames.len() as u16);
 
         for mut frame in self.frames.drain(..) {
-            frame.serialize_into(buffer);
+            frame.serialize_into(&mut buffer);
         }
 
         self.sequence_number = self.sequence_number.wrapping_add(1);
@@ -85,7 +85,7 @@ impl SerializeInto for MessageSerializer {
 }
 
 impl SerializeInto for socketcan::CANFrame {
-    fn serialize_into(&mut self, buffer: &mut impl BufMut) {
+    fn serialize_into(&mut self, mut buffer: impl BufMut) {
         buffer.put_u32({
             let mut id = self.id();
 
@@ -111,24 +111,24 @@ impl DeserializeFrom for socketcan::CANFrame {
     type Value = Self;
     type Error = socketcan::ConstructionError;
 
-    fn deserialize_from(buffer: &mut impl Buf) -> Result<Self::Value, Self::Error> {
+    fn deserialize_from(mut buffer: impl Buf) -> Result<Self::Value, Self::Error> {
         let id = buffer.get_u32();
         let len = buffer.get_u8() as usize;
         let mut data = [0u8; 8]; // Initialization unnecessary, but easier for now..
-        buffer.copy_to_slice(&mut data[..(len as usize)]);
-        socketcan::CANFrame::new(id & socketcan::EFF_MASK, &data[..len], id & socketcan::RTR_FLAG > 0, id & socketcan::ERR_FLAG > 0)
+        buffer.copy_to_slice(&mut data[..(len)]);
+        socketcan::CANFrame::new(id & socketcan::EFF_MASK /* TODO: This looks fishy.. */, &data[..len], id & socketcan::RTR_FLAG > 0, id & socketcan::ERR_FLAG > 0)
     }
 }
 
 
-pub struct MessageReader<'buffer, Buffer> {
-    buffer: &'buffer mut Buffer,
+pub struct MessageReader<Buffer> {
+    buffer: Buffer,
     remaining: u16,
     sequence_number: u8,
 }
 
-impl<'buffer, Buffer: Buf> MessageReader<'buffer, Buffer> {
-    pub fn try_read(buffer: &'buffer mut Buffer) -> Option<Self> {
+impl<Buffer: Buf> MessageReader<Buffer> {
+    pub fn try_read(mut buffer: Buffer) -> Option<Self> {
         // TODO: Range checks!
 
         if IMPLEMENTED_VERSION == buffer.get_u8() &&
@@ -154,14 +154,14 @@ impl<'buffer, Buffer: Buf> MessageReader<'buffer, Buffer> {
     }
 }
 
-impl<'buffer, Buffer: Buf> Iterator for MessageReader<'buffer, Buffer> {
+impl<Buffer: Buf> Iterator for MessageReader<Buffer> {
     type Item = socketcan::CANFrame;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining > 0 {
             self.remaining -= 1;
 
-            if let Ok(frame) = socketcan::CANFrame::deserialize_from(self.buffer) {
+            if let Ok(frame) = socketcan::CANFrame::deserialize_from(&mut self.buffer) {
                 return Some(frame);
             } else {
                 self.remaining = 0;
