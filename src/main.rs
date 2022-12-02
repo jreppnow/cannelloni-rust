@@ -56,8 +56,7 @@ async fn receive() {
     let mut count = 0usize;
     let mut buffer = vec![0u8; 1024];
     while let Ok((n, _)) = udp_socket.recv_from(&mut buffer).await {
-        let mut buffer: VecDeque<u8> = buffer[0..n].iter().copied().collect();
-        if let Some(decoder) = proto::MessageReader::try_read(&mut buffer) {
+        if let Some(decoder) = proto::MessageReader::try_read(&mut &buffer[..n]) {
             for frame in decoder {
                 let _ = can_socket.write_frame(&frame).await;
             }
