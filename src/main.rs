@@ -21,10 +21,6 @@
 
 extern crate core;
 
-use std::collections::VecDeque;
-
-use async_std::task::block_on;
-
 mod async_can;
 mod proto;
 
@@ -51,12 +47,9 @@ async fn receive() {
     let udp_socket = async_std::net::UdpSocket::bind("127.0.0.2:5678").await.unwrap();
     let can_socket: async_can::AsyncCanSocket = socketcan::CANSocket::open("vcan1").unwrap().into();
 
-    let mut encoder = proto::MessageSerializer::new();
-
-    let mut count = 0usize;
     let mut buffer = vec![0u8; 1024];
     while let Ok((n, _)) = udp_socket.recv_from(&mut buffer).await {
-        if let Some(decoder) = proto::MessageReader::try_read(&mut &buffer[..n]) {
+        if let Some(decoder) = proto::MessageReader::try_read(&buffer[..n]) {
             for frame in decoder {
                 let _ = can_socket.write_frame(&frame).await;
             }

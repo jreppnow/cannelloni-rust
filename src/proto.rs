@@ -17,12 +17,12 @@
  */
 
 use std::collections::VecDeque;
-use std::io::Read;
 
 use bytes::{Buf, BufMut};
 
 const IMPLEMENTED_VERSION: u8 = 2;
 
+#[allow(unused)]
 enum OpCode {
     Data = 0x0,
     Ack = 0x1,
@@ -59,6 +59,7 @@ impl MessageSerializer {
         }
     }
 
+    #[allow(unused)]
     pub fn sequence_number(&self) -> u8 {
         self.sequence_number
     }
@@ -145,10 +146,12 @@ impl<Buffer: Buf> MessageReader<Buffer> {
         }
     }
 
+    #[allow(unused)]
     pub fn remaining(&self) -> u16 {
         self.remaining
     }
 
+    #[allow(unused)]
     pub fn sequence_number(&self) -> u8 {
         self.sequence_number
     }
