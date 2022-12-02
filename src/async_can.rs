@@ -24,7 +24,7 @@ use std::os::unix::io::AsRawFd;
 use async_io::Async;
 pub use socketcan::{CANFrame, CANSocket, CANSocketOpenError};
 
-struct AsyncCanSocket {
+pub struct AsyncCanSocket {
     watcher: Async<CANSocket>,
 }
 
@@ -37,7 +37,7 @@ impl From<CANSocket> for AsyncCanSocket {
 }
 
 impl AsyncCanSocket {
-    async fn read_frame(&self) -> std::io::Result<CANFrame> {
+    pub async fn read_frame(&self) -> std::io::Result<CANFrame> {
         let mut frame = CANFrame::new(0, &[0; 8], false, false).unwrap();
         self.watcher.read_with(|fd| {
             let ret = unsafe {
@@ -53,7 +53,7 @@ impl AsyncCanSocket {
         Ok(frame)
     }
 
-    async fn write_frame(&self, frame: &CANFrame) -> std::io::Result<()> {
+    pub async fn write_frame(&self, frame: &CANFrame) -> std::io::Result<()> {
         self.watcher.write_with(|fd| {
             let ret = unsafe {
                 libc::write(fd.as_raw_fd(), frame as *const CANFrame as *const c_void, size_of::<CANFrame>() as c_size_t)
@@ -78,7 +78,7 @@ mod tests {
 
     #[test]
     fn async_read_and_write() {
-        use futures::{prelude::*, join, executor};
+        use futures::{join, executor};
 
         let writer: AsyncCanSocket = socketcan::CANSocket::open("vcan").unwrap().into();
         let reader: AsyncCanSocket = socketcan::CANSocket::open("vcan").unwrap().into();

@@ -34,13 +34,12 @@ pub struct MessageSerializer {
     frames: Vec<socketcan::CANFrame>,
 }
 
-trait SerializeInto {
+pub trait SerializeInto {
     fn serialize_into(&mut self, buffer: &mut impl BufMut);
 
     fn serialize(&mut self) -> VecDeque<u8> {
         let mut buffer: Vec<u8> = Default::default();
         self.serialize_into(&mut buffer);
-        dbg!(&buffer);
         <Vec<u8> as Into<VecDeque<u8>>>::into(buffer)
     }
 }
@@ -60,11 +59,11 @@ impl MessageSerializer {
         }
     }
 
-    fn sequence_number(&self) -> u8 {
+    pub fn sequence_number(&self) -> u8 {
         self.sequence_number
     }
 
-    fn push_frame(&mut self, frame: socketcan::CANFrame) {
+    pub fn push_frame(&mut self, frame: socketcan::CANFrame) {
         self.frames.push(frame)
     }
 }
@@ -122,7 +121,7 @@ impl DeserializeFrom for socketcan::CANFrame {
 }
 
 
-struct MessageReader<'buffer, Buffer> {
+pub struct MessageReader<'buffer, Buffer> {
     buffer: &'buffer mut Buffer,
     remaining: u16,
     sequence_number: u8,

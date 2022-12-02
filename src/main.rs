@@ -21,9 +21,57 @@
 
 extern crate core;
 
+use std::collections::VecDeque;
+
+use async_std::task::block_on;
+
 mod async_can;
 mod proto;
 
+async fn send() {
+    let udp_socket = async_std::net::UdpSocket::bind("127.0.0.1:5678").await.unwrap();
+    let can_socket: async_can::AsyncCanSocket = socketcan::CANSocket::open("vcan0").unwrap().into();
+
+    let mut encoder = proto::MessageSerializer::new();
+
+    let mut count = 0usize;
+    while let Ok(frame) = can_socket.read_frame().await {
+        count += 1;
+        encoder.push_frame(frame);
+        if count == 10 {
+            count = 0;
+            use crate::proto::SerializeInto;
+            let mut serialized = encoder.serialize();
+            udp_socket.send_to(serialized.make_contiguous(), "127.0.0.2:5678").await.unwrap();
+        }
+    }
+}
+
+async fn receive() {
+    let udp_socket = async_std::net::UdpSocket::bind("127.0.0.2:5678").await.unwrap();
+    let can_socket: async_can::AsyncCanSocket = socketcan::CANSocket::open("vcan1").unwrap().into();
+
+    let mut encoder = proto::MessageSerializer::new();
+
+    let mut count = 0usize;
+    let mut buffer = vec![0u8; 1024];
+    while let Ok((n, _)) = udp_socket.recv_from(&mut buffer).await {
+        let mut buffer: VecDeque<u8> = buffer[0..n].iter().copied().collect();
+        if let Some(decoder) = proto::MessageReader::try_read(&mut buffer) {
+            for frame in decoder {
+                let _ = can_socket.write_frame(&frame).await;
+            }
+        }
+    }
+}
+
 fn main() {
-    println!("Hello, world!");
+    use futures::prelude::*;
+
+    async_std::task::block_on(async {
+        futures::select! {
+            _ = send().fuse() => (),
+            _ = receive().fuse() => (),
+        }
+    });
 }
