@@ -22,10 +22,10 @@
 mod async_can;
 mod proto;
 
-async fn send() {
-    let udp_socket = smol::net::UdpSocket::bind("127.0.0.1:5678").await.unwrap();
-    let can_socket: async_can::AsyncCanSocket = socketcan::CANSocket::open("vcan0").unwrap().into();
+use crate::async_can::AsyncCanSocket;
+use smol::net::{UdpSocket, SocketAddr};
 
+async fn send(can_socket: &AsyncCanSocket, udp_socket: &UdpSocket) {
     let mut encoder = proto::MessageSerializer::new();
 
     let mut count = 0usize;
@@ -41,15 +41,23 @@ async fn send() {
     }
 }
 
-async fn receive() {
-    let udp_socket = smol::net::UdpSocket::bind("127.0.0.2:5678").await.unwrap();
-    let can_socket: async_can::AsyncCanSocket = socketcan::CANSocket::open("vcan1").unwrap().into();
-
+/// Listen for packets on a UDP socket, unwrap them and transfer them onto a can socket..
+///
+/// # Arguments
+///
+/// * `can_socket`: The CAN socket (destination).
+/// * `udp_socket`:  The UDP socket (source).
+/// * `local_address`: The local address of this applications. If the sender address of a packet is the same as this, it will be ignored. Needed for multicast.
+///
+/// returns: ()
+async fn receive(can_socket: &AsyncCanSocket, udp_socket: &UdpSocket, local_address: SocketAddr /* TODO: Make this an Option? Unfortunately does not play nice with match or if let.. */)  {
     let mut buffer = vec![0u8; 1024];
-    while let Ok((n, _)) = udp_socket.recv_from(&mut buffer).await {
-        if let Some(decoder) = proto::MessageReader::try_read(&buffer[..n]) {
-            for frame in decoder {
-                let _ = can_socket.write_frame(&frame).await;
+    while let Ok((n, peer)) = udp_socket.recv_from(&mut buffer).await {
+        if peer != local_address {
+            if let Some(decoder) = proto::MessageReader::try_read(&buffer[..n]) {
+                for frame in decoder {
+                    let _ = can_socket.write_frame(&frame).await;
+                }
             }
         }
     }
@@ -59,9 +67,12 @@ fn main() {
     use futures::prelude::*;
 
     smol::block_on(async {
+        let udp_socket = UdpSocket::bind("127.0.0.1:5678").await.unwrap();
+        let can_socket: AsyncCanSocket = socketcan::CANSocket::open("vcan1").unwrap().into();
+
         futures::select! {
-            _ = send().fuse() => (),
-            _ = receive().fuse() => (),
+            _ = send(&can_socket, &udp_socket).fuse() => (),
+            _ = receive(&can_socket, &udp_socket, udp_socket.local_addr().expect("Failed to get local addr!")).fuse() => (),
         }
     });
 }
