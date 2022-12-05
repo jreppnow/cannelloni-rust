@@ -42,6 +42,8 @@ pub trait SerializeInto {
         self.serialize_into(&mut buffer);
         <Vec<u8> as Into<VecDeque<u8>>>::into(buffer)
     }
+
+    fn encoded_size(&self) -> usize;
 }
 
 trait DeserializeFrom {
@@ -83,6 +85,14 @@ impl SerializeInto for MessageSerializer {
 
         self.sequence_number = self.sequence_number.wrapping_add(1);
     }
+
+    fn encoded_size(&self) -> usize {
+        let mut size = 5;
+        for frame in &self.frames {
+            size += frame.encoded_size();
+        }
+        size
+    }
 }
 
 impl SerializeInto for socketcan::CANFrame {
@@ -106,6 +116,10 @@ impl SerializeInto for socketcan::CANFrame {
         // buffer.put_u8(self.flags) // TODO: CAN-FD
         buffer.put_slice(self.data());
     }
+
+    fn encoded_size(&self) -> usize {
+        4 + 1 + self.data().len()
+    }
 }
 
 impl DeserializeFrom for socketcan::CANFrame {
@@ -117,10 +131,14 @@ impl DeserializeFrom for socketcan::CANFrame {
         let len = buffer.get_u8() as usize;
         let mut data = [0u8; 8]; // Initialization unnecessary, but easier for now..
         buffer.copy_to_slice(&mut data[..(len)]);
-        socketcan::CANFrame::new(id & socketcan::EFF_MASK /* TODO: This looks fishy.. */, &data[..len], id & socketcan::RTR_FLAG > 0, id & socketcan::ERR_FLAG > 0)
+        socketcan::CANFrame::new(
+            id & socketcan::EFF_MASK, /* TODO: This looks fishy.. */
+            &data[..len],
+            id & socketcan::RTR_FLAG > 0,
+            id & socketcan::ERR_FLAG > 0,
+        )
     }
 }
-
 
 pub struct MessageReader<Buffer> {
     buffer: Buffer,
@@ -132,8 +150,7 @@ impl<Buffer: Buf> MessageReader<Buffer> {
     pub fn try_read(mut buffer: Buffer) -> Option<Self> {
         // TODO: Range checks!
 
-        if IMPLEMENTED_VERSION == buffer.get_u8() &&
-            OpCode::Data as u8 == buffer.get_u8() {
+        if IMPLEMENTED_VERSION == buffer.get_u8() && OpCode::Data as u8 == buffer.get_u8() {
             let sequence_number = buffer.get_u8();
             let remaining = buffer.get_u16();
             Some(Self {

@@ -29,28 +29,25 @@ use std::time::Duration;
 
 use futures::prelude::*;
 
+const UDP_NO_FRAGMENT_MAX_PAYLOAD_SIZE: usize = 508;
+
 async fn send(can_socket: &AsyncCanSocket, udp_socket: &UdpSocket, force_after: Duration) {
     let mut encoder = MessageSerializer::new();
-
-    let mut count = 0usize;
-
     let mut timer: Option<Fuse<Timer>> = None;
 
     loop {
         timer = match timer {
             None => {
                 if let Ok(frame) = can_socket.read_frame().await {
-                    count += 1;
-                    encoder.push_frame(frame);
-                    if count == 10 {
-                        count = 0;
+                    if encoder.encoded_size() + frame.encoded_size()
+                        > UDP_NO_FRAGMENT_MAX_PAYLOAD_SIZE
+                    {
                         send_frame(udp_socket, &mut encoder).await;
-                        None
-                    } else {
-                        Some(futures::FutureExt::fuse(Timer::after(force_after)))
                     }
+                    encoder.push_frame(frame);
+                    Some(futures::FutureExt::fuse(Timer::after(force_after)))
                 } else {
-                    break;
+                    None
                 }
             }
             Some(mut timer) => {
@@ -61,13 +58,13 @@ async fn send(can_socket: &AsyncCanSocket, udp_socket: &UdpSocket, force_after: 
                     }
                     frame = can_socket.read_frame().fuse() => {
                         if let Ok(frame) = frame {
-                            count += 1;
-                            encoder.push_frame(frame);
-                            if count == 10 {
-                                count = 0;
+                            if encoder.encoded_size() + frame.encoded_size() > UDP_NO_FRAGMENT_MAX_PAYLOAD_SIZE {
                                 send_frame(udp_socket, &mut encoder).await;
-                                None
+                                encoder.push_frame(frame);
+                                // new timer, since we have sent the last packet..
+                                Some(futures::FutureExt::fuse(Timer::after(force_after)))
                             } else {
+                                encoder.push_frame(frame);
                                 Some(timer)
                             }
                         } else {
@@ -81,9 +78,10 @@ async fn send(can_socket: &AsyncCanSocket, udp_socket: &UdpSocket, force_after: 
 }
 
 async fn send_frame(udp_socket: &UdpSocket, encoder: &mut MessageSerializer) {
-    use crate::proto::SerializeInto;
     let mut serialized = encoder.serialize();
-    udp_socket.send(serialized.make_contiguous()).await.unwrap();
+    if let Err(err) = udp_socket.send(serialized.make_contiguous()).await {
+        eprintln!("Failed to send via UDP socket! {}", err);
+    };
 }
 
 /// Listen for packets on a UDP socket, unwrap them and transfer them onto a can socket..
@@ -100,20 +98,25 @@ async fn receive(
     udp_socket: &UdpSocket,
     local_address: SocketAddr, /* TODO: Make this an Option? Unfortunately does not play nice with match or if let.. */
 ) {
-    let mut buffer = [0u8; 1024];
-    while let Ok((n, peer)) = udp_socket.recv_from(&mut buffer).await {
-        if peer != local_address {
-            if let Some(decoder) = proto::MessageReader::try_read(&buffer[..n]) {
-                for frame in decoder {
-                    let _ = can_socket.write_frame(&frame).await;
+    let mut buffer = [0u8; UDP_NO_FRAGMENT_MAX_PAYLOAD_SIZE];
+    loop {
+        match udp_socket.recv_from(&mut buffer).await {
+            Ok((n, peer)) => {
+                if peer != local_address {
+                    if let Some(decoder) = proto::MessageReader::try_read(&buffer[..n]) {
+                        for frame in decoder {
+                            let _ = can_socket.write_frame(&frame).await;
+                        }
+                    }
                 }
             }
+            Err(err) => eprintln!("Failed to read from UDP socket! {}", err),
         }
     }
 }
 
 use crate::future::Fuse;
-use crate::proto::MessageSerializer;
+use crate::proto::{MessageSerializer, SerializeInto};
 use clap::Parser;
 use futures::select;
 
