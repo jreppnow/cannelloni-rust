@@ -23,22 +23,67 @@ mod async_can;
 mod proto;
 
 use crate::async_can::AsyncCanSocket;
+use async_io::Timer;
 use smol::net::{SocketAddr, UdpSocket};
+use std::time::Duration;
 
-async fn send(can_socket: &AsyncCanSocket, udp_socket: &UdpSocket) {
-    let mut encoder = proto::MessageSerializer::new();
+use futures::prelude::*;
+
+async fn send(can_socket: &AsyncCanSocket, udp_socket: &UdpSocket, force_after: Duration) {
+    let mut encoder = MessageSerializer::new();
 
     let mut count = 0usize;
-    while let Ok(frame) = can_socket.read_frame().await {
-        count += 1;
-        encoder.push_frame(frame);
-        if count == 10 {
-            count = 0;
-            use crate::proto::SerializeInto;
-            let mut serialized = encoder.serialize();
-            udp_socket.send(serialized.make_contiguous()).await.unwrap();
+
+    let mut timer: Option<Fuse<Timer>> = None;
+
+    loop {
+        timer = match timer {
+            None => {
+                if let Ok(frame) = can_socket.read_frame().await {
+                    count += 1;
+                    encoder.push_frame(frame);
+                    if count == 10 {
+                        count = 0;
+                        send_frame(udp_socket, &mut encoder).await;
+                        None
+                    } else {
+                        Some(futures::FutureExt::fuse(Timer::after(force_after)))
+                    }
+                } else {
+                    break;
+                }
+            }
+            Some(mut timer) => {
+                select! {
+                    _ = &mut timer => {
+                        send_frame(udp_socket, &mut encoder).await;
+                        None
+                    }
+                    frame = can_socket.read_frame().fuse() => {
+                        if let Ok(frame) = frame {
+                            count += 1;
+                            encoder.push_frame(frame);
+                            if count == 10 {
+                                count = 0;
+                                send_frame(udp_socket, &mut encoder).await;
+                                None
+                            } else {
+                                Some(timer)
+                            }
+                        } else {
+                            Some(timer)
+                        }
+                    }
+                }
+            }
         }
     }
+}
+
+async fn send_frame(udp_socket: &UdpSocket, encoder: &mut MessageSerializer) {
+    use crate::proto::SerializeInto;
+    let mut serialized = encoder.serialize();
+    udp_socket.send(serialized.make_contiguous()).await.unwrap();
 }
 
 /// Listen for packets on a UDP socket, unwrap them and transfer them onto a can socket..
@@ -67,11 +112,10 @@ async fn receive(
     }
 }
 
-enum Protocol {
-    Udp,
-}
-
+use crate::future::Fuse;
+use crate::proto::MessageSerializer;
 use clap::Parser;
+use futures::select;
 
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
@@ -87,14 +131,16 @@ struct Args {
     /// CAN interface name to forward frames to and from.
     #[arg(long, short)]
     can: String,
+
+    /// After how many milliseconds a packet must be sent, regardless of how many frames it contains.
+    #[arg(long, short, default_value_t = 50)]
+    force_after_ms: usize,
 }
 
 fn main() {
     let args = Args::parse();
 
     smol::block_on(async {
-        use futures::prelude::*;
-
         let remote_address: SocketAddr = args
             .remote
             .parse()
@@ -111,8 +157,8 @@ fn main() {
 
         let can_socket: AsyncCanSocket = socketcan::CANSocket::open(&args.can).unwrap().into();
 
-        futures::select! {
-            _ = send(&can_socket, &udp_socket).fuse() => (),
+        select! {
+            _ = send(&can_socket, &udp_socket, Duration::from_millis(args.force_after_ms as u64)).fuse() => (),
             _ = receive(&can_socket, &udp_socket, udp_socket.local_addr().expect("Failed to get local addr!")).fuse() => (),
         }
     });
