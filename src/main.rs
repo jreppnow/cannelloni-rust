@@ -76,15 +76,15 @@ use clap::Parser;
 #[derive(Parser, Debug)]
 #[command(author, version, about, long_about = None)]
 struct Args {
-    /// Name of the person to greet
+    /// Local address to bind to.
     #[arg(long, short)]
     bind: String,
 
-    /// Name of the person to greet
+    /// Remote address to connect to.
     #[arg(long, short)]
     remote: String,
 
-    /// Name of the person to greet
+    /// CAN interface name to forward frames to and from.
     #[arg(long, short)]
     can: String,
 }
