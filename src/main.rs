@@ -23,7 +23,7 @@ mod async_can;
 mod proto;
 
 use crate::async_can::AsyncCanSocket;
-use smol::net::{UdpSocket, SocketAddr};
+use smol::net::{SocketAddr, UdpSocket};
 
 async fn send(can_socket: &AsyncCanSocket, udp_socket: &UdpSocket) {
     let mut encoder = proto::MessageSerializer::new();
@@ -36,7 +36,7 @@ async fn send(can_socket: &AsyncCanSocket, udp_socket: &UdpSocket) {
             count = 0;
             use crate::proto::SerializeInto;
             let mut serialized = encoder.serialize();
-            udp_socket.send_to(serialized.make_contiguous(), "127.0.0.2:5678").await.unwrap();
+            udp_socket.send(serialized.make_contiguous()).await.unwrap();
         }
     }
 }
@@ -50,7 +50,11 @@ async fn send(can_socket: &AsyncCanSocket, udp_socket: &UdpSocket) {
 /// * `local_address`: The local address of this applications. If the sender address of a packet is the same as this, it will be ignored. Needed for multicast.
 ///
 /// returns: ()
-async fn receive(can_socket: &AsyncCanSocket, udp_socket: &UdpSocket, local_address: SocketAddr /* TODO: Make this an Option? Unfortunately does not play nice with match or if let.. */)  {
+async fn receive(
+    can_socket: &AsyncCanSocket,
+    udp_socket: &UdpSocket,
+    local_address: SocketAddr, /* TODO: Make this an Option? Unfortunately does not play nice with match or if let.. */
+) {
     let mut buffer = vec![0u8; 1024];
     while let Ok((n, peer)) = udp_socket.recv_from(&mut buffer).await {
         if peer != local_address {
@@ -63,12 +67,49 @@ async fn receive(can_socket: &AsyncCanSocket, udp_socket: &UdpSocket, local_addr
     }
 }
 
+enum Protocol {
+    Udp,
+}
+
+use clap::Parser;
+
+#[derive(Parser, Debug)]
+#[command(author, version, about, long_about = None)]
+struct Args {
+    /// Name of the person to greet
+    #[arg(long, short)]
+    bind: String,
+
+    /// Name of the person to greet
+    #[arg(long, short)]
+    remote: String,
+
+    /// Name of the person to greet
+    #[arg(long, short)]
+    can: String,
+}
+
 fn main() {
-    use futures::prelude::*;
+    let args = Args::parse();
 
     smol::block_on(async {
-        let udp_socket = UdpSocket::bind("127.0.0.1:5678").await.unwrap();
-        let can_socket: AsyncCanSocket = socketcan::CANSocket::open("vcan1").unwrap().into();
+        use futures::prelude::*;
+
+        let remote_address: SocketAddr = args
+            .remote
+            .parse()
+            .expect("Failed to parse remote address!");
+        let local_address: SocketAddr = args.bind.parse().expect("Failed to parse local address.");
+
+        let udp_socket = UdpSocket::bind(local_address)
+            .await
+            .expect("Failed to bind to local address.");
+        udp_socket
+            .connect(remote_address)
+            .await
+            .expect("Failed to connect to remote address");
+
+        let can_socket: AsyncCanSocket = socketcan::CANSocket::open(&args.can).unwrap().into();
 
         futures::select! {
             _ = send(&can_socket, &udp_socket).fuse() => (),
