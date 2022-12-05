@@ -55,7 +55,7 @@ async fn receive(
     udp_socket: &UdpSocket,
     local_address: SocketAddr, /* TODO: Make this an Option? Unfortunately does not play nice with match or if let.. */
 ) {
-    let mut buffer = vec![0u8; 1024];
+    let mut buffer = [0u8; 1024];
     while let Ok((n, peer)) = udp_socket.recv_from(&mut buffer).await {
         if peer != local_address {
             if let Some(decoder) = proto::MessageReader::try_read(&buffer[..n]) {
