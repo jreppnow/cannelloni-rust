@@ -23,7 +23,7 @@ mod async_can;
 mod proto;
 
 async fn send() {
-    let udp_socket = async_std::net::UdpSocket::bind("127.0.0.1:5678").await.unwrap();
+    let udp_socket = smol::net::UdpSocket::bind("127.0.0.1:5678").await.unwrap();
     let can_socket: async_can::AsyncCanSocket = socketcan::CANSocket::open("vcan0").unwrap().into();
 
     let mut encoder = proto::MessageSerializer::new();
@@ -42,7 +42,7 @@ async fn send() {
 }
 
 async fn receive() {
-    let udp_socket = async_std::net::UdpSocket::bind("127.0.0.2:5678").await.unwrap();
+    let udp_socket = smol::net::UdpSocket::bind("127.0.0.2:5678").await.unwrap();
     let can_socket: async_can::AsyncCanSocket = socketcan::CANSocket::open("vcan1").unwrap().into();
 
     let mut buffer = vec![0u8; 1024];
@@ -58,7 +58,7 @@ async fn receive() {
 fn main() {
     use futures::prelude::*;
 
-    async_std::task::block_on(async {
+    smol::block_on(async {
         futures::select! {
             _ = send().fuse() => (),
             _ = receive().fuse() => (),
