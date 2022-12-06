@@ -19,6 +19,8 @@
 #![feature(c_size_t)]
 #![feature(future_join)] // for tests..
 
+extern crate core;
+
 mod async_can;
 mod proto;
 
@@ -31,7 +33,12 @@ use futures::prelude::*;
 
 const UDP_NO_FRAGMENT_MAX_PAYLOAD_SIZE: usize = 508;
 
-async fn send(can_socket: &AsyncCanSocket, udp_socket: &UdpSocket, force_after: Duration) {
+async fn send(
+    can_socket: &AsyncCanSocket,
+    udp_socket: &UdpSocket,
+    force_after: Duration,
+    target: &SocketAddr,
+) {
     let mut encoder = MessageSerializer::new();
     let mut timer: Option<Fuse<Timer>> = None;
 
@@ -42,7 +49,7 @@ async fn send(can_socket: &AsyncCanSocket, udp_socket: &UdpSocket, force_after: 
                     if encoder.encoded_size() + frame.encoded_size()
                         > UDP_NO_FRAGMENT_MAX_PAYLOAD_SIZE
                     {
-                        send_frame(udp_socket, &mut encoder).await;
+                        send_frame(udp_socket, &mut encoder, target).await;
                     }
                     encoder.push_frame(frame);
                     Some(futures::FutureExt::fuse(Timer::after(force_after)))
@@ -53,13 +60,13 @@ async fn send(can_socket: &AsyncCanSocket, udp_socket: &UdpSocket, force_after: 
             Some(mut timer) => {
                 select! {
                     _ = &mut timer => {
-                        send_frame(udp_socket, &mut encoder).await;
+                        send_frame(udp_socket, &mut encoder, target).await;
                         None
                     }
                     frame = can_socket.read_frame().fuse() => {
                         if let Ok(frame) = frame {
                             if encoder.encoded_size() + frame.encoded_size() > UDP_NO_FRAGMENT_MAX_PAYLOAD_SIZE {
-                                send_frame(udp_socket, &mut encoder).await;
+                                send_frame(udp_socket, &mut encoder, target).await;
                                 encoder.push_frame(frame);
                                 // new timer, since we have sent the last packet..
                                 Some(futures::FutureExt::fuse(Timer::after(force_after)))
@@ -77,9 +84,12 @@ async fn send(can_socket: &AsyncCanSocket, udp_socket: &UdpSocket, force_after: 
     }
 }
 
-async fn send_frame(udp_socket: &UdpSocket, encoder: &mut MessageSerializer) {
+async fn send_frame(udp_socket: &UdpSocket, encoder: &mut MessageSerializer, target: &SocketAddr) {
     let mut serialized = encoder.serialize();
-    if let Err(err) = udp_socket.send(serialized.make_contiguous()).await {
+    if let Err(err) = udp_socket
+        .send_to(serialized.make_contiguous(), target)
+        .await
+    {
         eprintln!("Failed to send via UDP socket! {}", err);
     };
 }
@@ -125,11 +135,11 @@ use futures::select;
 struct Args {
     /// Local address to bind to.
     #[arg(long, short)]
-    bind: String,
+    bind: SocketAddr,
 
     /// Remote address to connect to.
     #[arg(long, short)]
-    remote: String,
+    remote: SocketAddr,
 
     /// CAN interface name to forward frames to and from.
     #[arg(long, short)]
@@ -144,25 +154,60 @@ fn main() {
     let args = Args::parse();
 
     smol::block_on(async {
-        let remote_address: SocketAddr = args
-            .remote
-            .parse()
-            .expect("Failed to parse remote address!");
-        let local_address: SocketAddr = args.bind.parse().expect("Failed to parse local address.");
-
-        let udp_socket = UdpSocket::bind(local_address)
-            .await
-            .expect("Failed to bind to local address.");
-        udp_socket
-            .connect(remote_address)
-            .await
-            .expect("Failed to connect to remote address");
+        let (udp_sender, udp_receiver) = create_udp_sockets(&args.bind, &args.remote).await;
 
         let can_socket: AsyncCanSocket = socketcan::CANSocket::open(&args.can).unwrap().into();
 
         select! {
-            _ = send(&can_socket, &udp_socket, Duration::from_millis(args.force_after_ms as u64)).fuse() => (),
-            _ = receive(&can_socket, &udp_socket, udp_socket.local_addr().expect("Failed to get local addr!")).fuse() => (),
+            _ = send(&can_socket, &udp_sender, Duration::from_millis(args.force_after_ms as u64), &args.remote).fuse() => (),
+            _ = receive(&can_socket, &udp_receiver, udp_sender.local_addr().expect("Failed to get local addr!")).fuse() => (),
         }
     });
+}
+
+async fn create_udp_sockets(local: &SocketAddr, remote: &SocketAddr) -> (UdpSocket, UdpSocket) {
+    match (remote, local) {
+        (SocketAddr::V4(remote), SocketAddr::V4(local)) if remote.ip().is_multicast() => {
+            let udp_receiver = UdpSocket::bind(remote)
+                .await
+                .expect("Failed to bind to multicast address.");
+            udp_receiver
+                .join_multicast_v4(*remote.ip(), *local.ip())
+                .expect("Failed to join multicast-group!");
+
+            let udp_sender = UdpSocket::bind(local)
+                .await
+                .expect("Failed to bind to local address.");
+            (udp_sender, udp_receiver)
+        }
+        (SocketAddr::V6(remote), SocketAddr::V6(local)) if remote.ip().is_multicast() => {
+            let udp_receiver = UdpSocket::bind(remote)
+                .await
+                .expect("Failed to bind to multicast address.");
+            udp_receiver
+                .join_multicast_v6(remote.ip(), remote.scope_id())
+                .expect("Failed to join multicast-group!");
+
+            let udp_sender = UdpSocket::bind(local)
+                .await
+                .expect("Failed to bind to local address.");
+            (udp_sender, udp_receiver)
+        }
+        (SocketAddr::V4(_), SocketAddr::V4(_)) | (SocketAddr::V6(_), SocketAddr::V6(_)) => {
+            let udp_socket = bind_simple(local, remote).await;
+            (udp_socket.clone(), udp_socket)
+        }
+        _ => panic!("Must specify either IPv4 or IPv6 for both bind and connect addresses!"),
+    }
+}
+
+async fn bind_simple(local_address: &SocketAddr, remote_address: &SocketAddr) -> UdpSocket {
+    let udp_socket = UdpSocket::bind(local_address)
+        .await
+        .expect("Failed to bind to local address.");
+    udp_socket
+        .connect(remote_address)
+        .await
+        .expect("Failed to connect to remote address");
+    udp_socket
 }
