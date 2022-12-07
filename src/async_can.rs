@@ -39,31 +39,43 @@ impl From<CANSocket> for AsyncCanSocket {
 impl AsyncCanSocket {
     pub async fn read_frame(&self) -> std::io::Result<CANFrame> {
         let mut frame = CANFrame::new(0, &[0; 8], false, false).unwrap();
-        self.watcher.read_with(|fd| {
-            let ret = unsafe {
-                libc::read(fd.as_raw_fd(), &mut frame as *mut CANFrame as *mut c_void, size_of::<CANFrame>() as c_size_t)
-            };
-            if ret > 0 {
-                Ok(ret)
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
-        }).await?;
+        self.watcher
+            .read_with(|fd| {
+                let ret = unsafe {
+                    libc::read(
+                        fd.as_raw_fd(),
+                        &mut frame as *mut CANFrame as *mut c_void,
+                        size_of::<CANFrame>() as c_size_t,
+                    )
+                };
+                if ret > 0 {
+                    Ok(ret)
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            })
+            .await?;
 
         Ok(frame)
     }
 
     pub async fn write_frame(&self, frame: &CANFrame) -> std::io::Result<()> {
-        self.watcher.write_with(|fd| {
-            let ret = unsafe {
-                libc::write(fd.as_raw_fd(), frame as *const CANFrame as *const c_void, size_of::<CANFrame>() as c_size_t)
-            };
-            if ret > 0 {
-                Ok(ret)
-            } else {
-                Err(std::io::Error::last_os_error())
-            }
-        }).await?;
+        self.watcher
+            .write_with(|fd| {
+                let ret = unsafe {
+                    libc::write(
+                        fd.as_raw_fd(),
+                        frame as *const CANFrame as *const c_void,
+                        size_of::<CANFrame>() as c_size_t,
+                    )
+                };
+                if ret > 0 {
+                    Ok(ret)
+                } else {
+                    Err(std::io::Error::last_os_error())
+                }
+            })
+            .await?;
 
         Ok(())
     }
@@ -79,16 +91,16 @@ mod tests {
 
     #[test]
     fn async_read_and_write() {
-        use futures::{join, executor};
+        use futures::{executor, join};
 
         let writer: AsyncCanSocket = socketcan::CANSocket::open("vcan").unwrap().into();
         let reader: AsyncCanSocket = socketcan::CANSocket::open("vcan").unwrap().into();
 
         let frame = socketcan::CANFrame::new(13, &[1, 3, 3, 7], false, false).unwrap();
 
-
         executor::block_on(async {
-            let (write_result, read_result) = join!(writer.write_frame(&frame), reader.read_frame());
+            let (write_result, read_result) =
+                join!(writer.write_frame(&frame), reader.read_frame());
 
             assert!(write_result.is_ok());
             assert!(frame.data() == read_result.unwrap().data());
