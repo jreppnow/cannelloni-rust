@@ -53,7 +53,7 @@ pub async fn send(
                         .context("Sending frame bundle after buffer size limit was reached..")?;
                 }
                 encoder.push_frame(frame);
-                Some(futures::FutureExt::fuse(Timer::after(force_after)))
+                Some(Timer::after(force_after).fuse())
             }
             Some(mut timer) => {
                 select! {
@@ -67,7 +67,7 @@ pub async fn send(
                             send_frame(udp_socket, &mut encoder, target).await.context("Sending frame bundle after buffer size limit was reached..")?;
                             encoder.push_frame(frame);
                             // new timer, since we have sent the last packet..
-                            Some(futures::FutureExt::fuse(Timer::after(force_after)))
+                            Some(Timer::after(force_after).fuse())
                         } else {
                             encoder.push_frame(frame);
                             Some(timer)
