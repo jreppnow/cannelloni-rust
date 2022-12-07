@@ -28,6 +28,7 @@ use crate::async_can::AsyncCanSocket;
 use async_io::Timer;
 use smol::net::{SocketAddr, UdpSocket};
 use std::time::Duration;
+use anyhow::Context;
 
 use futures::prelude::*;
 
@@ -38,35 +39,32 @@ async fn send(
     udp_socket: &UdpSocket,
     force_after: Duration,
     target: &SocketAddr,
-) {
+) -> anyhow::Result<()> {
     let mut encoder = MessageSerializer::new();
     let mut timer: Option<Fuse<Timer>> = None;
 
     loop {
         timer = match timer {
             None => {
-                if let Ok(frame) = can_socket.read_frame().await {
-                    if encoder.encoded_size() + frame.encoded_size()
-                        > UDP_NO_FRAGMENT_MAX_PAYLOAD_SIZE
-                    {
-                        send_frame(udp_socket, &mut encoder, target).await;
-                    }
-                    encoder.push_frame(frame);
-                    Some(futures::FutureExt::fuse(Timer::after(force_after)))
-                } else {
-                    None
+                let frame = can_socket.read_frame().await.context("Trying to read CAN frame..")?;
+                if encoder.encoded_size() + frame.encoded_size()
+                    > UDP_NO_FRAGMENT_MAX_PAYLOAD_SIZE
+                {
+                    send_frame(udp_socket, &mut encoder, target).await.context("Sending frame bundle after buffer size limit was reached..")?;
                 }
+                encoder.push_frame(frame);
+                Some(futures::FutureExt::fuse(Timer::after(force_after)))
             }
             Some(mut timer) => {
                 select! {
                     _ = &mut timer => {
-                        send_frame(udp_socket, &mut encoder, target).await;
+                        send_frame(udp_socket, &mut encoder, target).await.context("Sending frame bundle after timer has expired..")?;
                         None
                     }
                     frame = can_socket.read_frame().fuse() => {
                         if let Ok(frame) = frame {
                             if encoder.encoded_size() + frame.encoded_size() > UDP_NO_FRAGMENT_MAX_PAYLOAD_SIZE {
-                                send_frame(udp_socket, &mut encoder, target).await;
+                                send_frame(udp_socket, &mut encoder, target).await.context("Sending frame bundle after buffer size limit was reached..")?;
                                 encoder.push_frame(frame);
                                 // new timer, since we have sent the last packet..
                                 Some(futures::FutureExt::fuse(Timer::after(force_after)))
@@ -84,14 +82,11 @@ async fn send(
     }
 }
 
-async fn send_frame(udp_socket: &UdpSocket, encoder: &mut MessageSerializer, target: &SocketAddr) {
+async fn send_frame(udp_socket: &UdpSocket, encoder: &mut MessageSerializer, target: &SocketAddr) -> anyhow::Result<()> {
     let mut serialized = encoder.serialize();
-    if let Err(err) = udp_socket
+    udp_socket
         .send_to(serialized.make_contiguous(), target)
-        .await
-    {
-        eprintln!("Failed to send via UDP socket! {}", err);
-    };
+        .await.map(|_| ()).context("Sending frame bundle via UDP..")
 }
 
 /// Listen for packets on a UDP socket, unwrap them and transfer them onto a can socket..
@@ -107,20 +102,16 @@ async fn receive(
     can_socket: &AsyncCanSocket,
     udp_socket: &UdpSocket,
     local_address: SocketAddr, /* TODO: Make this an Option? Unfortunately does not play nice with match or if let.. */
-) {
+) -> anyhow::Result<()> {
     let mut buffer = [0u8; UDP_NO_FRAGMENT_MAX_PAYLOAD_SIZE];
     loop {
-        match udp_socket.recv_from(&mut buffer).await {
-            Ok((n, peer)) => {
-                if peer != local_address {
-                    if let Some(decoder) = proto::MessageReader::try_read(&buffer[..n]) {
-                        for frame in decoder {
-                            let _ = can_socket.write_frame(&frame).await;
-                        }
-                    }
+        let (n, peer) = udp_socket.recv_from(&mut buffer).await.context("Failed to read from UDP socket!")?;
+        if peer != local_address {
+            if let Some(decoder) = proto::MessageReader::try_read(&buffer[..n]) {
+                for frame in decoder {
+                    let _ = can_socket.write_frame(&frame).await;
                 }
             }
-            Err(err) => eprintln!("Failed to read from UDP socket! {}", err),
         }
     }
 }
@@ -150,64 +141,64 @@ struct Args {
     force_after_ms: usize,
 }
 
-fn main() {
+fn main() -> anyhow::Result<()> {
     let args = Args::parse();
 
     smol::block_on(async {
-        let (udp_sender, udp_receiver) = create_udp_sockets(&args.bind, &args.remote).await;
+        let (udp_sender, udp_receiver) = create_udp_sockets(&args.bind, &args.remote).await.context("Creating UDP sockets..")?;
 
-        let can_socket: AsyncCanSocket = socketcan::CANSocket::open(&args.can).unwrap().into();
+        let can_socket: AsyncCanSocket = socketcan::CANSocket::open(&args.can).context("Trying to open async can socket..").context("Creating CAN socket..")?.into();
 
         select! {
-            _ = send(&can_socket, &udp_sender, Duration::from_millis(args.force_after_ms as u64), &args.remote).fuse() => (),
-            _ = receive(&can_socket, &udp_receiver, udp_sender.local_addr().expect("Failed to get local addr!")).fuse() => (),
+            sent = send(&can_socket, &udp_sender, Duration::from_millis(args.force_after_ms as u64), &args.remote).fuse() => sent.context("Trying to send frames to the remote.."),
+            received = receive(&can_socket, &udp_receiver, udp_sender.local_addr().context("Getting local addr from socket..")?).fuse() => received.context("Trying to receive frames from the remote.."),
         }
-    });
+    }).context("Asynchronously handling sending and receiving..")?;
+
+    Ok(())
 }
 
-async fn create_udp_sockets(local: &SocketAddr, remote: &SocketAddr) -> (UdpSocket, UdpSocket) {
+async fn create_udp_sockets(local: &SocketAddr, remote: &SocketAddr) -> anyhow::Result<(UdpSocket, UdpSocket)> {
     match (remote, local) {
         (SocketAddr::V4(remote), SocketAddr::V4(local)) if remote.ip().is_multicast() => {
             let udp_receiver = UdpSocket::bind(remote)
                 .await
-                .expect("Failed to bind to multicast address.");
+                .context(format!("Binding to multicast addr: {remote}.."))?;
             udp_receiver
                 .join_multicast_v4(*remote.ip(), *local.ip())
-                .expect("Failed to join multicast-group!");
+                .context(format!("Joining IPv4 multicast group: {}..", remote.ip()))?;
 
             let udp_sender = UdpSocket::bind(local)
                 .await
-                .expect("Failed to bind to local address.");
-            (udp_sender, udp_receiver)
+                .context(format!("Binding sender socket to local address: {local}.."))?;
+            Ok((udp_sender, udp_receiver))
         }
         (SocketAddr::V6(remote), SocketAddr::V6(local)) if remote.ip().is_multicast() => {
             let udp_receiver = UdpSocket::bind(remote)
                 .await
-                .expect("Failed to bind to multicast address.");
+                .context(format!("Binding to multicast addr: {remote}.."))?;
             udp_receiver
                 .join_multicast_v6(remote.ip(), remote.scope_id())
-                .expect("Failed to join multicast-group!");
+                .context(format!("Joining IPv6 multicast group: {}..", remote.ip()))?;
 
             let udp_sender = UdpSocket::bind(local)
                 .await
-                .expect("Failed to bind to local address.");
-            (udp_sender, udp_receiver)
+                .context(format!("Binding sender socket to local address: {local}.."))?;
+            Ok((udp_sender, udp_receiver))
         }
         (SocketAddr::V4(_), SocketAddr::V4(_)) | (SocketAddr::V6(_), SocketAddr::V6(_)) => {
-            let udp_socket = bind_simple(local, remote).await;
-            (udp_socket.clone(), udp_socket)
+            let udp_socket = bind_simple(local, remote).await.context("Binding unicast socket..")?;
+            Ok((udp_socket.clone(), udp_socket))
         }
-        _ => panic!("Must specify either IPv4 or IPv6 for both bind and connect addresses!"),
+        _ => anyhow::bail!("Must specify EITHER IPv4 or IPv6 for both bind and connect addresses!"),
     }
 }
 
-async fn bind_simple(local_address: &SocketAddr, remote_address: &SocketAddr) -> UdpSocket {
+async fn bind_simple(local_address: &SocketAddr, remote_address: &SocketAddr) -> anyhow::Result<UdpSocket> {
     let udp_socket = UdpSocket::bind(local_address)
-        .await
-        .expect("Failed to bind to local address.");
+        .await.context(format!("Binding to local address: {local_address}.."))?;
     udp_socket
         .connect(remote_address)
-        .await
-        .expect("Failed to connect to remote address");
-    udp_socket
+        .await.context(format!("Connecting to remote address: {remote_address}.."))?;
+    Ok(udp_socket)
 }
