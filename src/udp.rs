@@ -16,13 +16,14 @@
  *  Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
-use anyhow::Context;
-use async_io::Timer;
-use futures::future::Fuse;
-use futures::{select, FutureExt};
-use smol::net::UdpSocket;
 use std::net::SocketAddr;
 use std::time::Duration;
+
+use anyhow::Context;
+use async_io::Timer;
+use futures::{FutureExt, select};
+use futures::future::Fuse;
+use smol::net::UdpSocket;
 
 use crate::async_can::AsyncCanSocket;
 use crate::proto;
