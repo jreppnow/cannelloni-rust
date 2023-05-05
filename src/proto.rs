@@ -65,7 +65,7 @@ impl MessageSerializer {
 
     #[allow(unused)]
     pub fn sequence_number(&self) -> u8 {
-        self.sequence_number.clone()
+        self.sequence_number
     }
 
     pub fn push_frame(&mut self, frame: socketcan::CanFrame) {
@@ -78,7 +78,7 @@ impl SerializeInto for MessageSerializer {
         // TODO: Check for available len?
         buffer.put_u8(IMPLEMENTED_VERSION);
         buffer.put_u8(OpCode::Data as u8);
-        buffer.put_u8(self.sequence_number.clone());
+        buffer.put_u8(self.sequence_number);
         buffer.put_u16(self.frames.len() as u16);
 
         for mut frame in self.frames.drain(..) {
@@ -101,10 +101,10 @@ impl SerializeInto for socketcan::CanFrame {
     fn serialize_into(&mut self, mut buffer: impl BufMut) {
         let self_raw = unsafe { &*self.as_ptr() };
 
-        buffer.put_u32(self_raw.can_id.clone());
-        buffer.put_u8(self_raw.can_dlc.clone());
+        buffer.put_u32(self_raw.can_id);
+        buffer.put_u8(self_raw.can_dlc);
         // buffer.put_u8(self.flags) // TODO: CAN-FD
-        buffer.put_slice(&self_raw.data[..self_raw.can_dlc.clone() as usize]);
+        buffer.put_slice(&self_raw.data[..self_raw.can_dlc as usize]);
     }
 
     fn encoded_size(&self) -> usize {
@@ -122,7 +122,7 @@ impl DeserializeFrom for socketcan::CanFrame {
         let id = buffer.get_u32();
         let len = buffer.get_u8();
         let mut data = [0u8; 8]; // Initialization unnecessary, but easier for now..
-        buffer.copy_to_slice(&mut data[..(len.clone() as usize)]);
+        buffer.copy_to_slice(&mut data[..len as usize]);
         let mut frame = can_frame_default();
         frame.can_id = id;
         frame.data = data;
@@ -156,12 +156,12 @@ impl<Buffer: Buf> MessageReader<Buffer> {
 
     #[allow(unused)]
     pub fn remaining(&self) -> u16 {
-        self.remaining.clone()
+        self.remaining
     }
 
     #[allow(unused)]
     pub fn sequence_number(&self) -> u8 {
-        self.sequence_number.clone()
+        self.sequence_number
     }
 }
 
@@ -225,7 +225,7 @@ mod tests {
         assert_eq!(frame.id(), deserialized_frame.id());
         assert_eq!(frame.data(), deserialized_frame.data());
         if let Error(_) | Remote(_) = deserialized_frame {
-            assert!(false);
+            panic!("Should be a data frame!");
         }
     }
 }
