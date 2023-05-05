@@ -18,9 +18,9 @@ jobs:
       - name: Install latest nightly
         uses: actions-rs/toolchain@v1
         with:
-            toolchain: nightly
-            override: true
-            components: rustfmt, clippy
+          toolchain: nightly
+          override: true
+          components: rustfmt, clippy
 
       # `cargo check` command here will use installed `nightly`
       # as it is set as an "override" for current directory
@@ -32,5 +32,10 @@ jobs:
       - name: Run cargo test
         uses: actions-rs/cargo@v1
         with:
-          command: test 
+          command: test
+          args: --verbose
+      - name: Run cargo test
+        uses: actions-rs/cargo@v1
+        with:
+          command: clippy
           args: --verbose
