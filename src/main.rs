@@ -26,6 +26,7 @@ use clap::Parser;
 use futures::prelude::*;
 use futures::select;
 use smol::net::SocketAddr;
+use socketcan::Socket;
 
 use crate::async_can::AsyncCanSocket;
 
@@ -59,7 +60,7 @@ fn main() -> anyhow::Result<()> {
     smol::block_on(async {
         let (udp_sender, udp_receiver) = udp::create_udp_sockets(&args.bind, &args.remote).await.context("Creating UDP sockets..")?;
 
-        let can_socket: AsyncCanSocket = socketcan::CANSocket::open(&args.can).context("Trying to open async can socket..").context("Creating CAN socket..")?.into();
+        let can_socket: AsyncCanSocket = socketcan::CanSocket::open(&args.can).context("Trying to open async can socket..").context("Creating CAN socket..")?.into();
 
         select! {
             sent = udp::send(&can_socket, &udp_sender, Duration::from_millis(args.force_after_ms as u64), &args.remote).fuse() => sent.context("Trying to send frames to the remote.."),

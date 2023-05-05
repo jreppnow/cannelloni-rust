@@ -19,6 +19,8 @@
 use std::collections::VecDeque;
 
 use bytes::{Buf, BufMut};
+use socketcan::frame::{can_frame_default, AsPtr};
+use socketcan::EmbeddedFrame;
 
 const IMPLEMENTED_VERSION: u8 = 2;
 
@@ -31,7 +33,7 @@ enum OpCode {
 
 pub struct MessageSerializer {
     sequence_number: u8,
-    frames: Vec<socketcan::CANFrame>,
+    frames: Vec<socketcan::CanFrame>,
 }
 
 pub trait SerializeInto {
@@ -63,10 +65,10 @@ impl MessageSerializer {
 
     #[allow(unused)]
     pub fn sequence_number(&self) -> u8 {
-        self.sequence_number
+        self.sequence_number.clone()
     }
 
-    pub fn push_frame(&mut self, frame: socketcan::CANFrame) {
+    pub fn push_frame(&mut self, frame: socketcan::CanFrame) {
         self.frames.push(frame)
     }
 }
@@ -76,7 +78,7 @@ impl SerializeInto for MessageSerializer {
         // TODO: Check for available len?
         buffer.put_u8(IMPLEMENTED_VERSION);
         buffer.put_u8(OpCode::Data as u8);
-        buffer.put_u8(self.sequence_number);
+        buffer.put_u8(self.sequence_number.clone());
         buffer.put_u16(self.frames.len() as u16);
 
         for mut frame in self.frames.drain(..) {
@@ -95,26 +97,14 @@ impl SerializeInto for MessageSerializer {
     }
 }
 
-impl SerializeInto for socketcan::CANFrame {
+impl SerializeInto for socketcan::CanFrame {
     fn serialize_into(&mut self, mut buffer: impl BufMut) {
-        buffer.put_u32({
-            let mut id = self.id();
+        let self_raw = unsafe { &*self.as_ptr() };
 
-            if id & !socketcan::SFF_MASK > 0 {
-                id |= socketcan::EFF_FLAG;
-            }
-            if self.is_error() {
-                id |= socketcan::ERR_FLAG;
-            }
-            if self.is_rtr() {
-                id |= socketcan::RTR_FLAG;
-            }
-
-            id
-        });
-        buffer.put_u8(self.data().len() as u8);
+        buffer.put_u32(self_raw.can_id.clone());
+        buffer.put_u8(self_raw.can_dlc.clone());
         // buffer.put_u8(self.flags) // TODO: CAN-FD
-        buffer.put_slice(self.data());
+        buffer.put_slice(&self_raw.data[..self_raw.can_dlc.clone() as usize]);
     }
 
     fn encoded_size(&self) -> usize {
@@ -122,21 +112,22 @@ impl SerializeInto for socketcan::CANFrame {
     }
 }
 
-impl DeserializeFrom for socketcan::CANFrame {
+impl DeserializeFrom for socketcan::CanFrame {
     type Value = Self;
     type Error = socketcan::ConstructionError;
 
-    fn deserialize_from(mut buffer: impl Buf) -> Result<Self::Value, Self::Error> {
+    fn deserialize_from(
+        mut buffer: impl Buf,
+    ) -> Result<Self::Value, <socketcan::CanFrame as DeserializeFrom>::Error> {
         let id = buffer.get_u32();
-        let len = buffer.get_u8() as usize;
+        let len = buffer.get_u8();
         let mut data = [0u8; 8]; // Initialization unnecessary, but easier for now..
-        buffer.copy_to_slice(&mut data[..(len)]);
-        socketcan::CANFrame::new(
-            id & socketcan::EFF_MASK, /* TODO: This looks fishy.. */
-            &data[..len],
-            id & socketcan::RTR_FLAG > 0,
-            id & socketcan::ERR_FLAG > 0,
-        )
+        buffer.copy_to_slice(&mut data[..(len.clone() as usize)]);
+        let mut frame = can_frame_default();
+        frame.can_id = id;
+        frame.data = data;
+        frame.can_dlc = len;
+        Ok(frame.into())
     }
 }
 
@@ -165,23 +156,23 @@ impl<Buffer: Buf> MessageReader<Buffer> {
 
     #[allow(unused)]
     pub fn remaining(&self) -> u16 {
-        self.remaining
+        self.remaining.clone()
     }
 
     #[allow(unused)]
     pub fn sequence_number(&self) -> u8 {
-        self.sequence_number
+        self.sequence_number.clone()
     }
 }
 
 impl<Buffer: Buf> Iterator for MessageReader<Buffer> {
-    type Item = socketcan::CANFrame;
+    type Item = socketcan::CanFrame;
 
     fn next(&mut self) -> Option<Self::Item> {
         if self.remaining > 0 {
             self.remaining -= 1;
 
-            if let Ok(frame) = socketcan::CANFrame::deserialize_from(&mut self.buffer) {
+            if let Ok(frame) = socketcan::CanFrame::deserialize_from(&mut self.buffer) {
                 return Some(frame);
             } else {
                 self.remaining = 0;
@@ -194,6 +185,9 @@ impl<Buffer: Buf> Iterator for MessageReader<Buffer> {
 
 #[cfg(test)]
 mod tests {
+    use socketcan::CanFrame::{Error, Remote};
+    use socketcan::{EmbeddedFrame, Id, StandardId};
+
     use super::*;
 
     #[test]
@@ -212,7 +206,11 @@ mod tests {
     #[test]
     fn single_frame() {
         let mut serializer = MessageSerializer::new();
-        let frame = socketcan::CANFrame::new(0x14, &[0, 1, 2, 3, 4], true, true).unwrap();
+        let frame = socketcan::CanFrame::new(
+            Id::Standard(StandardId::new(0x14).unwrap()),
+            &[0, 1, 2, 3, 4],
+        )
+        .unwrap();
         serializer.push_frame(frame);
 
         let mut result = serializer.serialize();
@@ -226,7 +224,8 @@ mod tests {
         let deserialized_frame = deserialized.next().expect("Frame must be deserializable!");
         assert_eq!(frame.id(), deserialized_frame.id());
         assert_eq!(frame.data(), deserialized_frame.data());
-        assert_eq!(frame.is_error(), deserialized_frame.is_error());
-        assert_eq!(frame.is_rtr(), deserialized_frame.is_rtr());
+        if let Error(_) | Remote(_) = deserialized_frame {
+            assert!(false);
+        }
     }
 }
