@@ -21,18 +21,19 @@ use std::time::Duration;
 
 use anyhow::Context;
 use async_io::Timer;
-use futures::{FutureExt, select};
 use futures::future::Fuse;
+use futures::{pin_mut, select, FutureExt};
 use smol::net::UdpSocket;
+use socketcan::async_io::CanFdSocket;
+use socketcan::{CanAnyFrame, CanFrame};
 
-use crate::async_can::AsyncCanSocket;
 use crate::proto;
-use crate::proto::{MessageSerializer, SerializeInto};
+use crate::proto::{encoded_size, MessageSerializer};
 
 const UDP_NO_FRAGMENT_MAX_PAYLOAD_SIZE: usize = 508;
 
 pub async fn send(
-    can_socket: &AsyncCanSocket,
+    can_socket: &CanFdSocket,
     udp_socket: &UdpSocket,
     force_after: Duration,
     target: &SocketAddr,
@@ -47,9 +48,8 @@ pub async fn send(
                     .read_frame()
                     .await
                     .context("Trying to read CAN frame..")?;
-                if encoder.encoded_size() + frame.encoded_size() > UDP_NO_FRAGMENT_MAX_PAYLOAD_SIZE
-                {
-                    send_frame(udp_socket, &mut encoder, target)
+                if encoder.len() + encoded_size(&frame) > UDP_NO_FRAGMENT_MAX_PAYLOAD_SIZE {
+                    send_frame(udp_socket, encoder.finalize().data(), target)
                         .await
                         .context("Sending frame bundle after buffer size limit was reached..")?;
                 }
@@ -59,13 +59,13 @@ pub async fn send(
             Some(mut timer) => {
                 select! {
                     _ = &mut timer => {
-                        send_frame(udp_socket, &mut encoder, target).await.context("Sending frame bundle after timer has expired..")?;
+                        send_frame(udp_socket, encoder.finalize().data(), target).await.context("Sending frame bundle after timer has expired..")?;
                         None
                     }
                     frame = can_socket.read_frame().fuse() => {
                         let frame = frame.context("Asynchronously reading frame from CAN socket..")?;
-                        if encoder.encoded_size() + frame.encoded_size() > UDP_NO_FRAGMENT_MAX_PAYLOAD_SIZE {
-                            send_frame(udp_socket, &mut encoder, target).await.context("Sending frame bundle after buffer size limit was reached..")?;
+                        if encoder.len() + encoded_size(&frame) > UDP_NO_FRAGMENT_MAX_PAYLOAD_SIZE {
+                            send_frame(udp_socket, encoder.finalize().data(), target).await.context("Sending frame bundle after buffer size limit was reached..")?;
                             encoder.push_frame(frame);
                             // new timer, since we have sent the last packet..
                             Some(Timer::after(force_after).fuse())
@@ -82,12 +82,11 @@ pub async fn send(
 
 async fn send_frame(
     udp_socket: &UdpSocket,
-    encoder: &mut MessageSerializer,
+    data: &[u8],
     target: &SocketAddr,
 ) -> anyhow::Result<()> {
-    let mut serialized = encoder.serialize();
     udp_socket
-        .send_to(serialized.make_contiguous(), target)
+        .send_to(data, target)
         .await
         .map(|_| ())
         .context("Sending frame bundle via UDP..")
@@ -103,7 +102,7 @@ async fn send_frame(
 ///
 /// returns: ()
 pub async fn receive(
-    can_socket: &AsyncCanSocket,
+    can_socket: &CanFdSocket,
     udp_socket: &UdpSocket,
     local_address: SocketAddr,
 ) -> anyhow::Result<()> {
@@ -114,9 +113,23 @@ pub async fn receive(
             .await
             .context("Failed to read from UDP socket!")?;
         if peer != local_address {
-            if let Some(decoder) = proto::MessageReader::try_read(&buffer[..n]) {
-                for frame in decoder {
-                    let _ = can_socket.write_frame(&frame).await;
+            if let Some(decoder) = proto::MessageReader::try_read(&buffer[..n]).await? {
+                use futures::stream::StreamExt;
+                let decoder = decoder.into_stream();
+                pin_mut!(decoder);
+                while let Some(frame) = decoder.next().await {
+                    let _ = match frame? {
+                        CanAnyFrame::Normal(frame) => {
+                            can_socket.write_frame(&CanFrame::from(frame)).await
+                        }
+                        CanAnyFrame::Error(frame) => {
+                            can_socket.write_frame(&CanFrame::from(frame)).await
+                        }
+                        CanAnyFrame::Remote(frame) => {
+                            can_socket.write_frame(&CanFrame::from(frame)).await
+                        }
+                        CanAnyFrame::Fd(frame) => can_socket.write_frame(&frame).await,
+                    };
                 }
             }
         }

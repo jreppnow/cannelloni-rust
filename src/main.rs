@@ -27,7 +27,6 @@ use futures::prelude::*;
 use futures::select;
 use smol::net::SocketAddr;
 use socketcan::async_io::CanFdSocket;
-use socketcan::Socket;
 
 mod proto;
 mod udp;

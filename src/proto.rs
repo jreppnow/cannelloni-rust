@@ -16,15 +16,13 @@
  *  Inc., 51 Franklin Street, Fifth Floor, Boston, MA  02110-1301, USA.
  */
 
-use std::collections::VecDeque;
-use std::io::Read;
-use std::mem::MaybeUninit;
+use std::slice;
 
-use bytes::{Buf, BufMut};
-use futures::AsyncRead;
+use bytes::BufMut;
+use futures::{io, AsyncRead, Stream};
 use libc::{can_frame, canfd_frame};
-use socketcan::{CanAnyFrame, CanFdFrame, EmbeddedFrame};
-use socketcan::frame::{AsPtr, can_frame_default};
+use socketcan::frame::{can_frame_default, canfd_frame_default};
+use socketcan::{CanAnyFrame, CanFdFrame, CanFrame, EmbeddedFrame};
 
 const IMPLEMENTED_VERSION: u8 = 2;
 
@@ -41,19 +39,28 @@ pub struct MessageSerializer {
     count: u16,
 }
 
+pub fn encoded_size(frame: &CanAnyFrame) -> usize {
+    match frame {
+        CanAnyFrame::Normal(frame) => 4 + 1 + frame.data().len(),
+        CanAnyFrame::Remote(frame) => 4 + 1 + frame.data().len(),
+        CanAnyFrame::Error(frame) => 4 + 1 + frame.data().len(),
+        CanAnyFrame::Fd(frame) => 4 + 1 + 1 + frame.data().len(),
+    }
+}
+
 const CANFD_FRAME_MARKER: u8 = 0x80;
 
 pub struct Finalizer<'serializer> {
     serializer: &'serializer mut MessageSerializer,
 }
 
-impl Finalizer {
+impl<'serializer> Finalizer<'serializer> {
     pub fn data(&self) -> &[u8] {
         &self.serializer.frames
     }
 }
 
-impl Drop for Finalizer {
+impl<'serializer> Drop for Finalizer<'serializer> {
     fn drop(&mut self) {
         self.serializer.reset()
     }
@@ -77,17 +84,17 @@ impl MessageSerializer {
 
     fn serialize_2_0_frame<F: AsRef<can_frame>>(&mut self, frame: &F) {
         let frame = frame.as_ref();
-        buffer.buffer.put_u32(frame.can_id);
-        buffer.put_u8(frame.can_dlc);
-        buffer.put_slice(&frame.data[..frame.len as usize]);
+        self.frames.put_u32(frame.can_id);
+        self.frames.put_u8(frame.can_dlc);
+        self.frames.put_slice(&frame.data[..frame.can_dlc as usize]);
     }
 
     fn serialize_fd_frame<F: AsRef<canfd_frame>>(&mut self, frame: &F) {
         let frame = frame.as_ref();
-        buffer.buffer.put_u32(frame.can_id);
-        buffer.put_u8(frame.len | CANFD_FRAME_MARKER);
-        buffer.put_u8(frame.flags);
-        buffer.put_slice(&frame.data[..frame.can_dlc as usize]);
+        self.frames.put_u32(frame.can_id);
+        self.frames.put_u8(frame.len | CANFD_FRAME_MARKER);
+        self.frames.put_u8(frame.flags);
+        self.frames.put_slice(&frame.data[..frame.len as usize]);
     }
 
     pub fn push_frame(&mut self, frame: socketcan::CanAnyFrame) {
@@ -101,10 +108,10 @@ impl MessageSerializer {
     }
 
     fn write_header(&mut self, length: u16) {
-        buffer.put_u8(IMPLEMENTED_VERSION);
-        buffer.put_u8(OpCode::Data as u8);
-        buffer.put_u8(self.sequence_number);
-        buffer.put_u16(length);
+        self.frames.put_u8(IMPLEMENTED_VERSION);
+        self.frames.put_u8(OpCode::Data as u8);
+        self.frames.put_u8(self.sequence_number);
+        self.frames.put_u16(length);
 
         self.sequence_number = self.sequence_number.wrapping_add(1);
     }
@@ -123,32 +130,41 @@ impl MessageSerializer {
 
         Finalizer { serializer: self }
     }
+
+    pub fn len(&self) -> usize {
+        self.frames.len()
+    }
 }
 
-
-pub fn deserialize_from(
-    mut buffer: impl AsyncRead,
-) -> Result<Self::Value, socketcan::ConstructionError> {
+pub async fn deserialize_from(mut buffer: impl AsyncRead + Unpin) -> anyhow::Result<CanAnyFrame> {
     use futures::AsyncReadExt;
-    let id = buffer.get_u32();
-    let mut len = buffer.get_u8();
+    let id = {
+        let mut bytes = [0u8; 4];
+        buffer.read_exact(&mut bytes).await?;
+        u32::from_be_bytes(bytes)
+    };
+    let mut len = 0u8;
+    buffer.read_exact(slice::from_mut(&mut len)).await?;
     if len & CANFD_FRAME_MARKER > 0 {
-        len = len & !CANFD_FRAME_MARKER;
-        let flags = buffer.get_u8();
-        let mut data = [MaybeUninit::uninit(); 64]; // Initialization unnecessary, but easier for now..
+        let mut frame: canfd_frame = canfd_frame_default();
+        frame.can_id = id;
+        frame.len = len & !CANFD_FRAME_MARKER;
+        buffer.read_exact(slice::from_mut(&mut frame.flags)).await?;
+        buffer
+            .read_exact(&mut frame.data[..frame.len as usize])
+            .await?;
 
-        CanFdFrame::
-        buffer.copy_to_bytes(&mut data[..].bytes(), len as usize);
-    } else {}
+        Ok(CanAnyFrame::Fd(CanFdFrame::try_from(frame)?))
+    } else {
+        let mut frame = can_frame_default();
+        frame.can_id = id;
+        frame.can_dlc = len;
+        buffer
+            .read_exact(&mut frame.data[..frame.can_dlc as usize])
+            .await?;
 
-    let mut data = [0u8; 8]; // Initialization unnecessary, but easier for now..
-    buffer.copy_to_slice(&mut data[..len as usize]);
-    let mut frame = can_frame_default();
-    frame.can_id = id;
-    frame.data = data;
-    frame.can_dlc = len;
-    Ok(frame.into())
-}
+        Ok(<CanAnyFrame as From<CanFrame>>::from(frame.into()))
+    }
 }
 
 pub struct MessageReader<Buffer> {
@@ -157,20 +173,35 @@ pub struct MessageReader<Buffer> {
     sequence_number: u8,
 }
 
-impl<Buffer: Buf> MessageReader<Buffer> {
-    pub fn try_read(mut buffer: Buffer) -> Option<Self> {
+impl<Buffer: AsyncRead + Unpin> MessageReader<Buffer> {
+    pub async fn try_read(mut buffer: Buffer) -> io::Result<Option<Self>> {
         // TODO: Range checks!
 
-        if IMPLEMENTED_VERSION == buffer.get_u8() && OpCode::Data as u8 == buffer.get_u8() {
-            let sequence_number = buffer.get_u8();
-            let remaining = buffer.get_u16();
-            Some(Self {
+        use futures::AsyncReadExt;
+
+        let mut version = 0u8;
+        buffer.read_exact(slice::from_mut(&mut version)).await?;
+
+        let mut op_code = 0u8;
+        buffer.read_exact(slice::from_mut(&mut op_code)).await?;
+
+        if IMPLEMENTED_VERSION == version && OpCode::Data as u8 == op_code {
+            let mut sequence_number = 0u8;
+            buffer
+                .read_exact(slice::from_mut(&mut sequence_number))
+                .await?;
+            let remaining = {
+                let mut bytes = [0u8; 2];
+                buffer.read_exact(&mut bytes).await?;
+                u16::from_be_bytes(bytes)
+            };
+            Ok(Some(Self {
                 buffer,
                 sequence_number,
                 remaining,
-            })
+            }))
         } else {
-            None
+            Ok(None)
         }
     }
 
@@ -183,30 +214,23 @@ impl<Buffer: Buf> MessageReader<Buffer> {
     pub fn sequence_number(&self) -> u8 {
         self.sequence_number
     }
-}
 
-impl<Buffer: Buf> Iterator for MessageReader<Buffer> {
-    type Item = socketcan::CanFrame;
-
-    fn next(&mut self) -> Option<Self::Item> {
-        if self.remaining > 0 {
-            self.remaining -= 1;
-
-            if let Ok(frame) = socketcan::CanFrame::deserialize_from(&mut self.buffer) {
-                return Some(frame);
+    pub fn into_stream(self) -> impl Stream<Item = anyhow::Result<CanAnyFrame>> {
+        futures::stream::unfold(self, |mut this| async {
+            if this.remaining > 0 {
+                this.remaining -= 1;
+                Some((deserialize_from(&mut this.buffer).await, this))
             } else {
-                self.remaining = 0;
+                None
             }
-        }
-
-        None
+        })
     }
 }
 
 #[cfg(test)]
 mod tests {
-    use socketcan::{EmbeddedFrame, Id, StandardId};
     use socketcan::CanFrame::{Error, Remote};
+    use socketcan::{EmbeddedFrame, Id, StandardId};
 
     use super::*;
 
@@ -230,7 +254,7 @@ mod tests {
             Id::Standard(StandardId::new(0x14).unwrap()),
             &[0, 1, 2, 3, 4],
         )
-            .unwrap();
+        .unwrap();
         serializer.push_frame(frame);
 
         let mut result = serializer.serialize();
