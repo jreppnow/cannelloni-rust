@@ -97,8 +97,8 @@ impl MessageSerializer {
         self.frames.put_slice(&frame.data[..frame.len as usize]);
     }
 
-    pub fn push_frame(&mut self, frame: socketcan::CanAnyFrame) {
-        match frame {
+    pub fn push_frame(&mut self, frame: impl Into<socketcan::CanAnyFrame>) {
+        match frame.into() {
             CanAnyFrame::Normal(frame) => self.serialize_2_0_frame(&frame),
             CanAnyFrame::Remote(frame) => self.serialize_2_0_frame(&frame),
             CanAnyFrame::Error(frame) => self.serialize_2_0_frame(&frame),
@@ -229,47 +229,60 @@ impl<Buffer: AsyncRead + Unpin> MessageReader<Buffer> {
 
 #[cfg(test)]
 mod tests {
-    use socketcan::CanFrame::{Error, Remote};
+    use futures::pin_mut;
     use socketcan::{EmbeddedFrame, Id, StandardId};
 
     use super::*;
 
     #[test]
     fn empty() {
-        let mut serializer = MessageSerializer::new();
-        for i in 0..10 {
-            let mut result = serializer.serialize();
+        smol::block_on(async {
+            let mut serializer = MessageSerializer::new();
+            for i in 0..10 {
+                let result = serializer.finalize();
+                let mut result = result.data();
 
-            let deserialized = MessageReader::try_read(&mut result).unwrap();
+                let deserializer = MessageReader::try_read(&mut result).await.unwrap().unwrap();
 
-            assert_eq!(i, deserialized.sequence_number());
-            assert_eq!(0, deserialized.remaining());
-        }
+                assert_eq!(i, deserializer.sequence_number());
+                assert_eq!(0, deserializer.remaining());
+            }
+        })
     }
 
     #[test]
     fn single_frame() {
-        let mut serializer = MessageSerializer::new();
-        let frame = socketcan::CanFrame::new(
-            Id::Standard(StandardId::new(0x14).unwrap()),
-            &[0, 1, 2, 3, 4],
-        )
-        .unwrap();
-        serializer.push_frame(frame);
+        smol::block_on(async {
+            let mut serializer = MessageSerializer::new();
+            let frame = socketcan::CanFrame::new(
+                Id::Standard(StandardId::new(0x14).unwrap()),
+                &[0, 1, 2, 3, 4],
+            )
+            .unwrap();
+            serializer.push_frame(frame);
 
-        let mut result = serializer.serialize();
+            let result = serializer.finalize();
+            let mut result = result.data();
 
-        let mut deserialized = MessageReader::try_read(&mut result).unwrap();
+            let deserialized = MessageReader::try_read(&mut result).await.unwrap().unwrap();
 
-        assert_eq!(0, deserialized.sequence_number());
-        assert_eq!(1, deserialized.remaining());
+            assert_eq!(0, deserialized.sequence_number());
+            assert_eq!(1, deserialized.remaining());
 
-        // no PartialEq on socketcan::CANFrame :(
-        let deserialized_frame = deserialized.next().expect("Frame must be deserializable!");
-        assert_eq!(frame.id(), deserialized_frame.id());
-        assert_eq!(frame.data(), deserialized_frame.data());
-        if let Error(_) | Remote(_) = deserialized_frame {
-            panic!("Should be a data frame!");
-        }
+            use futures::TryStreamExt;
+            // no PartialEq on socketcan::CANFrame :(
+            let decoder = deserialized.into_stream();
+            pin_mut!(decoder);
+            let deserialized_frame = decoder
+                .try_next()
+                .await
+                .expect("Frame must be deserializable!")
+                .expect("Must contain at least one frame!");
+            let CanAnyFrame::Normal(deserialized_frame) = deserialized_frame else {
+                panic!("Got a different frame type than originally inserted into the stream!");
+            };
+            assert_eq!(frame.id(), deserialized_frame.id());
+            assert_eq!(frame.data(), deserialized_frame.data());
+        })
     }
 }
